@@ -1,96 +1,72 @@
-import time
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import NoSuchElementException
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 
 
 class AmazonAPI:
-    def __init__(self, search_term, min_price, max_price):
-        self.base_url = "https://www.amazon.de/"
-        self.search_term = search_term
-        self.min_price = min_price
-        self.max_price = max_price
+    def __init__(self, search, min_price=0, max_price=999999):
+        self.search = search
+        self.min_price = float(min_price)
+        self.max_price = float(max_price)
 
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
+        self.base_url = "https://www.amazon.de/s"
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
-        self.driver = webdriver.Chrome(options=chrome_options)
+    def build_url(self):
+        return f"{self.base_url}?k={self.search.replace(' ', '+')}"
 
-        self.price_filter = f"&rh=p_36%3A{min_price}00-{max_price}00"
+    def scrape(self):
+        url = self.build_url()
 
-    def run(self):
-        try:
-            links = self.get_product_links()
-            products = self.get_products_info(links)
-            return products
-        finally:
-            self.driver.quit()
+        response = requests.get(url, headers=self.headers, timeout=15)
+        soup = BeautifulSoup(response.text, "lxml")
 
-    def get_product_links(self):
-        self.driver.get(self.base_url)
-
-        search_box = self.driver.find_element(By.ID, "twotabsearchtextbox")
-        search_box.send_keys(self.search_term)
-        search_box.send_keys(Keys.ENTER)
-
-        time.sleep(3)
-
-        self.driver.get(f"{self.driver.current_url}{self.price_filter}")
-        time.sleep(3)
-
-        results = self.driver.find_elements(By.XPATH, "//h2/a")
-
-        links = [r.get_attribute("href") for r in results if r.get_attribute("href")]
-
-        return links[:10]  # limit to 10 products for speed
-
-    def get_products_info(self, links):
         products = []
 
-        for link in links:
-            try:
-                self.driver.get(link)
-                time.sleep(2)
+        items = soup.select("div.s-result-item")
 
-                title = self.driver.find_element(By.ID, "productTitle").text
-                price = self.get_price()
-                seller = self.get_seller()
+        for item in items:
+            title = item.select_one("h2 span")
+            price_whole = item.select_one(".a-price-whole")
+            price_fraction = item.select_one(".a-price-fraction")
+            link = item.select_one("h2 a")
 
-                products.append({
-                    "title": title,
-                    "price": price,
-                    "seller": seller,
-                    "url": link
-                })
-
-            except Exception:
+            if not title or not price_whole:
                 continue
 
-        return products
+            price_text = price_whole.text.replace(".", "")
+            if price_fraction:
+                price_text += "." + price_fraction.text
 
-    def get_price(self):
-        try:
-            price = self.driver.find_element(By.ID, "priceblock_ourprice").text
-        except NoSuchElementException:
             try:
-                price = self.driver.find_element(By.CLASS_NAME, "a-price-whole").text
+                price = float(price_text)
             except:
-                return None
+                continue
 
-        price = price.replace("€", "").replace(",", ".").strip()
-        try:
-            return float(price)
-        except:
-            return None
+            if not (self.min_price <= price <= self.max_price):
+                continue
 
-    def get_seller(self):
-        try:
-            return self.driver.find_element(By.ID, "bylineInfo").text
-        except:
-            return "Unknown"
+            product = {
+                "title": title.text.strip(),
+                "price": price,
+                "link": "https://www.amazon.de" + link["href"] if link else None
+            }
+
+            products.append(product)
+
+        best_item = min(products, key=lambda x: x["price"]) if products else None
+
+        return {
+            "title": self.search,
+            "date": datetime.utcnow().isoformat(),
+            "filters": {
+                "min": self.min_price,
+                "max": self.max_price
+            },
+            "base_link": self.base_url,
+            "best_item": best_item,
+            "products": products
+        }
