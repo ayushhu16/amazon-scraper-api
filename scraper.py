@@ -2,62 +2,69 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-
-class AmazonAPI:
+class MediaSpaceAPI:
     def __init__(self, search, min_price=0, max_price=999999):
-        self.search = search
+        self.search = search.lower()
         self.min_price = float(min_price)
         self.max_price = float(max_price)
-
-        self.base_url = "https://www.amazon.de/s"
+        self.base_url = "https://mediaspace.mu/"
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         }
 
-    def build_url(self):
-        return f"{self.base_url}?k={self.search.replace(' ', '+')}"
+    def build_search_url(self):
+        # Mediaspace doesn’t have a search query param like Amazon.
+        # So we go to the main shop and filter manually.
+        return self.base_url + "shop/"
+
+    def parse_price(self, text):
+        try:
+            # remove currency and formatting
+            price = text.replace("₨", "").replace(",", "").strip()
+            return float(price)
+        except:
+            return None
 
     def scrape(self):
-        url = self.build_url()
-
-        response = requests.get(url, headers=self.headers, timeout=15)
+        url = self.build_search_url()
+        response = requests.get(url, headers=self.headers, timeout=10)
         soup = BeautifulSoup(response.text, "lxml")
 
         products = []
 
-        items = soup.select("div.s-result-item")
+        # find product blocks (these usually have price and title)
+        for item in soup.select("li.product"):
+            title_el = item.select_one("h2.woocommerce-loop-product__title")
+            price_el = item.select_one("span.woocommerce-Price-amount")
+            link_el = item.select_one("a.woocommerce-LoopProduct-link")
 
-        for item in items:
-            title = item.select_one("h2 span")
-            price_whole = item.select_one(".a-price-whole")
-            price_fraction = item.select_one(".a-price-fraction")
-            link = item.select_one("h2 a")
-
-            if not title or not price_whole:
+            if not title_el or not price_el or not link_el:
                 continue
 
-            price_text = price_whole.text.replace(".", "")
-            if price_fraction:
-                price_text += "." + price_fraction.text
+            title = title_el.text.strip()
 
-            try:
-                price = float(price_text)
-            except:
+            # only include products matching search term
+            if self.search not in title.lower():
                 continue
 
-            if not (self.min_price <= price <= self.max_price):
+            price = self.parse_price(price_el.text)
+            link = link_el["href"]
+
+            # price filter check
+            if price is None or not (self.min_price <= price <= self.max_price):
                 continue
 
-            product = {
-                "title": title.text.strip(),
+            products.append({
+                "title": title,
                 "price": price,
-                "link": "https://www.amazon.de" + link["href"] if link else None
-            }
+                "link": link
+            })
 
-            products.append(product)
-
-        best_item = min(products, key=lambda x: x["price"]) if products else None
+        # Determine best (lowest price)
+        best_item = None
+        if products:
+            products = sorted(products, key=lambda x: x["price"])
+            best_item = products[0]
 
         return {
             "title": self.search,
@@ -66,7 +73,7 @@ class AmazonAPI:
                 "min": self.min_price,
                 "max": self.max_price
             },
-            "base_link": self.base_url,
+            "base_link": url,
             "best_item": best_item,
             "products": products
         }
